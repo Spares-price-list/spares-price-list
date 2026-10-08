@@ -1,0 +1,18 @@
+{
+  "site_title": "Spares Price List",
+
+  "skip_tabs": ["SETTINGS", "Pricing Rules", "*Summary*", "*Purchases*"],
+  "skip_hidden_tabs": true,
+
+  "low_priority_tabs": ["Parts_*"],
+
+  "option_labels": {
+    "Supplier A": "Original",
+    "Supplier B": "Alternative",
+    "Supplier B Quality 1": "Quality 1",
+    "Supplier B Quality 2": "Quality 2",
+    "Supplier B Quality 3": "Quality 3"
+  },
+
+  "safety_stop_drop_percent": 50
+}
