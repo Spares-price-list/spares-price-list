@@ -1,5 +1,5 @@
 /* Offline copy for salespersons. Bump SHELL when site files change. */
-const SHELL = 'price-list-shell-v3';
+const SHELL = 'price-list-shell-v6';
 const DATA = 'price-list-data-v2';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];

@@ -1,23 +1,30 @@
 /* Sales price list: shows selling prices only.
-   The price file is encrypted; this phone keeps the unlock key after the first password. */
+   The price file is encrypted; this phone keeps the unlock key after the first password.
+   Screens: Home (brand cards with models)  ->  Parts list (brand / model / search). */
 (() => {
   'use strict';
 
   const KEY_STORE = 'price-list-key-v2';
-  const BRAND_STORE = 'price-list-brand';
   const DATA_URL = 'data/prices.json';
   const META_URL = 'data/meta.json';
-  const PAGE = 60;
+  const PAGE = 60;            // part cards added per scroll step
+  const TOP_MODELS = 5;       // models shown on a brand card before "Show all"
+  const SMALL_BRAND = 10;     // brands with fewer parts go into "More brands"
+  const NO_MODEL = '~';
 
   const $ = (id) => document.getElementById(id);
   const money = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const num = (n) => n.toLocaleString('en-IN');
 
   let ENC = null;        // encrypted file
   let DATA = null;       // decrypted payload
   let PARTS = [];
+  let BRANDS = [];       // [{key, name, parts, models:[{key,name,count}]}]
+  let route = { b: '', m: '' };
   let filtered = [];
   let shown = 0;
   let lastCheck = 0;
+  let homeScroll = 0;
 
   // ---------- storage (may be blocked: always wrapped) ----------
   const store = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) { /* ignore */ } };
@@ -53,7 +60,7 @@
     } catch (e) { return null; }
   }
 
-  // ---------- start ----------
+  // ---------- start / lock ----------
   async function start() {
     if (!window.crypto || !crypto.subtle) {
       showLock('This browser cannot open the price list. Please use Chrome or Safari.');
@@ -107,51 +114,230 @@
 
   $('lockBtn').addEventListener('click', () => {
     store(KEY_STORE, null);
-    DATA = null; PARTS = []; $('list').textContent = '';
+    DATA = null; PARTS = []; BRANDS = [];
+    $('list').textContent = ''; $('bgrid').textContent = '';
     showLock('Locked. Enter the password to open again.');
   });
 
   // ---------- data ----------
   const norm = (s) => String(s || '').toLowerCase().replace(/[\s\-_./]/g, '');
+  const brandKey = (b) => (/^(|-|unidentified|not available|n\/a)$/i.test((b || '').trim()) ? 'OTHER' : b.trim().toUpperCase());
+  const modelKey = (m) => (m || '').trim().toUpperCase().replace(/\s+/g, ' ') || NO_MODEL;
 
   function openApp(data) {
     DATA = data;
     lastCheck = Date.now();
     PARTS = data.parts.map(([n, p, b, m, o], i) => ({
       n, p, b, m, o, i,
-      bk: /^(|-|unidentified|not available|n\/a)$/i.test((b || '').trim()) ? 'OTHER' : b.trim().toUpperCase(),
+      bk: brandKey(b),
+      mk: modelKey(m),
       key: norm(p),
       hay: [n, p, b, m].join(' ').toLowerCase(),
       hayN: norm([n, p, m].join(' ')),
     }));
-    $('updated').textContent = 'Prices updated ' + (data.updated_text || '');
     buildBrands();
+    $('updated').textContent = 'Updated ' + (data.updated_text || '');
     $('lock').hidden = true;
     $('app').hidden = false;
-    applyFilter();
+    readRoute();
+    render();
   }
 
   function buildBrands() {
-    const sel = $('brand');
-    const counts = new Map();
-    const names = new Map();
+    const map = new Map();
     for (const x of PARTS) {
-      counts.set(x.bk, (counts.get(x.bk) || 0) + 1);
-      if (!names.has(x.bk)) names.set(x.bk, x.bk === 'OTHER' ? 'Other' : x.b.trim());
+      let br = map.get(x.bk);
+      if (!br) {
+        br = { key: x.bk, name: x.bk === 'OTHER' ? 'Other / no brand' : x.b.trim(), parts: 0, priced: 0, models: new Map() };
+        map.set(x.bk, br);
+      }
+      br.parts++;
+      if (x.o.some((o) => o[1] != null)) br.priced++;
+      const md = br.models.get(x.mk) || { key: x.mk, name: x.mk === NO_MODEL ? '' : x.m.trim(), count: 0 };
+      md.count++;
+      br.models.set(x.mk, md);
     }
-    const keep = sel.value || load(BRAND_STORE) || '';
-    sel.textContent = '';
-    sel.append(new Option('All brands', ''));
-    [...counts.keys()].sort((a, b) => (a === 'OTHER') - (b === 'OTHER') || a.localeCompare(b))
-      .forEach((k) => sel.append(new Option(names.get(k) + ' (' + counts.get(k) + ')', k)));
-    sel.value = counts.has(keep) ? keep : '';
+    BRANDS = [...map.values()].map((br) => ({
+      ...br,
+      models: [...br.models.values()].sort((a, b) =>
+        (a.key === NO_MODEL) - (b.key === NO_MODEL) || b.count - a.count || a.name.localeCompare(b.name)),
+    })).sort((a, b) => (a.key === 'OTHER') - (b.key === 'OTHER') || a.name.localeCompare(b.name));
+    buildHome();
   }
 
-  function applyFilter() {
+  // ---------- routing (#/b/BRAND and #/b/BRAND/m/MODEL; phone back button works) ----------
+  function readRoute() {
+    const m = location.hash.match(/^#\/b\/([^/]+)(?:\/m\/(.+))?$/);
+    route = m ? { b: decodeURIComponent(m[1]), m: m[2] ? decodeURIComponent(m[2]) : '' } : { b: '', m: '' };
+    if (route.b && !BRANDS.some((br) => br.key === route.b)) route = { b: '', m: '' };
+  }
+
+  function go(b, m) {
+    if (!route.b) homeScroll = window.scrollY;
+    $('q').value = '';
+    const hash = b ? '#/b/' + encodeURIComponent(b) + (m ? '/m/' + encodeURIComponent(m) : '') : '#/';
+    if (location.hash === hash || (!b && !location.hash)) { readRoute(); render(); } else location.hash = hash;
+  }
+
+  window.addEventListener('hashchange', () => { if (DATA) { readRoute(); render(); } });
+
+  // ---------- small DOM helpers ----------
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  };
+
+  function hue(s) {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+    return h;
+  }
+
+  function initials(name) {
+    const w = name.replace(/[^A-Za-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+    if (!w.length) return '#';
+    return (w.length > 1 ? w[0][0] + w[1][0] : w[0].slice(0, 2)).toUpperCase();
+  }
+
+  const CHEVRON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
+
+  // ---------- home: brand cards ----------
+  function row(label, count, b, m, cls) {
+    const li = el('li', cls || null);
+    const btn = el('button', 'mrow');
+    btn.type = 'button';
+    btn.dataset.b = b;
+    if (m) btn.dataset.m = m;
+    btn.append(el('span', 'mname', label), el('span', 'mnum', num(count)));
+    li.append(btn);
+    return li;
+  }
+
+  function coverage(priced, total) {
+    const bar = el('div', 'cov');
+    const pct = total ? Math.round((priced / total) * 100) : 0;
+    bar.title = num(priced) + ' of ' + num(total) + ' parts have a price';
+    bar.setAttribute('role', 'img');
+    bar.setAttribute('aria-label', bar.title);
+    const fill = el('span');
+    fill.style.width = pct + '%';
+    bar.append(fill);
+    return bar;
+  }
+
+  function brandCard(br) {
+    const card = el('section', 'bcard');
+    const head = el('button', 'bhead');
+    head.type = 'button';
+    head.dataset.b = br.key;
+    const mono = el('span', 'mono', br.key === 'OTHER' ? '?' : initials(br.name));
+    mono.style.setProperty('--h', hue(br.key));
+    head.append(mono, el('span', 'bname', br.name), el('span', 'bnum', num(br.parts) + ' parts'));
+    head.insertAdjacentHTML('beforeend', CHEVRON);
+    card.append(head, coverage(br.priced, br.parts));
+
+    const ul = el('ul', 'mlist');
+    const named = br.models.filter((m) => m.key !== NO_MODEL);
+    const rest = br.models.find((m) => m.key === NO_MODEL);
+    if (!named.length) {
+      ul.append(row('All parts', br.parts, br.key, ''));
+    } else {
+      named.forEach((m, i) => ul.append(row(m.name, m.count, br.key, m.key, i >= TOP_MODELS ? 'extra' : '')));
+      if (rest) ul.append(row('Other parts (no model)', rest.count, br.key, NO_MODEL, 'rest'));
+    }
+    card.append(ul);
+
+    if (named.length > TOP_MODELS) {
+      const t = el('button', 'mtoggle', 'Show all ' + named.length + ' models');
+      t.type = 'button';
+      t.addEventListener('click', () => {
+        const open = card.classList.toggle('open');
+        t.textContent = open ? 'Show fewer' : 'Show all ' + named.length + ' models';
+      });
+      card.append(t);
+    }
+    return card;
+  }
+
+  function buildHome() {
+    const grid = $('bgrid');
+    grid.textContent = '';
+    const big = BRANDS.filter((b) => b.parts >= SMALL_BRAND || b.key === 'OTHER');
+    const small = BRANDS.filter((b) => b.parts < SMALL_BRAND && b.key !== 'OTHER');
+    big.forEach((br) => grid.append(brandCard(br)));
+    if (small.length) {
+      const card = el('section', 'bcard');
+      const head = el('div', 'bhead static');
+      const mono = el('span', 'mono', '+');
+      mono.style.setProperty('--h', 200);
+      head.append(mono, el('span', 'bname', 'More brands'), el('span', 'bnum', small.length + ' brands'));
+      card.append(head, coverage(small.reduce((a, b) => a + b.priced, 0), small.reduce((a, b) => a + b.parts, 0)));
+      const ul = el('ul', 'mlist');
+      small.forEach((br) => ul.append(row(br.name, br.parts, br.key, '')));
+      card.append(ul);
+      grid.append(card);
+    }
+  }
+
+  $('bgrid').addEventListener('click', (ev) => {
+    const btn = ev.target.closest('button[data-b]');
+    if (btn) go(btn.dataset.b, btn.dataset.m || '');
+  });
+
+  // ---------- rendering the current screen ----------
+  function brandOf(key) { return BRANDS.find((b) => b.key === key); }
+
+  function crumbs(q) {
+    const nav = $('crumbs');
+    nav.textContent = '';
+    const add = (label, b, m) => {
+      const btn = el('button', 'crumb', label);
+      btn.type = 'button';
+      btn.addEventListener('click', () => go(b, m));
+      nav.append(btn);
+    };
+    const sep = () => nav.append(el('span', 'sep', '›'));
+    const back = el('button', 'crumb back');
+    back.type = 'button';
+    back.setAttribute('aria-label', 'Back to all brands');
+    back.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg>';
+    back.append(el('span', null, 'All brands'));
+    back.addEventListener('click', () => go('', ''));
+    nav.append(back);
+    const br = route.b && brandOf(route.b);
+    if (br) {
+      sep();
+      if (route.m || q) add(br.name, br.key, ''); else nav.append(el('span', 'here', br.name));
+      if (route.m) {
+        const md = br.models.find((x) => x.key === route.m);
+        const label = route.m === NO_MODEL ? 'Other parts' : (md ? md.name : route.m);
+        sep();
+        if (q) add(label, br.key, route.m); else nav.append(el('span', 'here', label));
+      }
+    }
+    if (q) { sep(); nav.append(el('span', 'here', 'Search')); }
+  }
+
+  function render() {
     const q = $('q').value.trim().toLowerCase();
-    const brand = $('brand').value;
     $('clearQ').hidden = !q;
-    let list = brand ? PARTS.filter((x) => x.bk === brand) : PARTS;
+    const atHome = !route.b && !q;
+
+    $('home').hidden = !atHome;
+    $('results').hidden = atHome;
+    $('crumbs').hidden = atHome;
+
+    if (atHome) {
+      $('count').textContent = num(PARTS.length) + ' parts · ' + BRANDS.length + ' brands';
+      requestAnimationFrame(() => window.scrollTo(0, homeScroll));
+      return;
+    }
+
+    let list = PARTS;
+    if (route.b) list = list.filter((x) => x.bk === route.b && (!route.m || x.mk === route.m));
+    const scopeTotal = list.length;
     if (q) {
       const qn = norm(q);
       const toks = q.split(/\s+/).filter(Boolean);
@@ -167,25 +353,18 @@
       scored.sort((a, b) => a[0] - b[0] || a[1].i - b[1].i);
       list = scored.map((z) => z[1]);
     }
+    crumbs(q);
     filtered = list;
     shown = 0;
     $('list').textContent = '';
     renderMore();
-    const total = PARTS.length.toLocaleString('en-IN');
-    $('count').textContent = (q || brand)
-      ? filtered.length.toLocaleString('en-IN') + ' of ' + total + ' parts'
-      : total + ' parts';
+    $('count').textContent = q
+      ? num(filtered.length) + ' of ' + num(scopeTotal) + ' parts'
+      : num(filtered.length) + ' parts';
     $('empty').hidden = filtered.length > 0;
   }
 
-  // ---------- rendering ----------
-  const el = (tag, cls, text) => {
-    const e = document.createElement(tag);
-    if (cls) e.className = cls;
-    if (text != null) e.textContent = text;
-    return e;
-  };
-
+  // ---------- part cards ----------
   function priceEl(v) {
     return v == null ? el('span', 'price request', 'Price on request') : el('span', 'price', '₹' + money.format(v));
   }
@@ -255,7 +434,7 @@
 
   if ('IntersectionObserver' in window) {
     new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting) && DATA && shown < filtered.length) renderMore();
+      if (entries.some((e) => e.isIntersecting) && DATA && !$('results').hidden && shown < filtered.length) renderMore();
     }, { rootMargin: '600px' }).observe($('more'));
   } else {
     window.addEventListener('scroll', () => {
@@ -263,11 +442,17 @@
     });
   }
 
-  // ---------- controls ----------
+  // ---------- search ----------
   let timer = 0;
-  $('q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(applyFilter, 120); });
-  $('clearQ').addEventListener('click', () => { $('q').value = ''; applyFilter(); $('q').focus(); });
-  $('brand').addEventListener('change', () => { store(BRAND_STORE, $('brand').value); applyFilter(); window.scrollTo(0, 0); });
+  $('q').addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (!route.b && $('q').value.trim() && !$('home').hidden) homeScroll = window.scrollY;
+      render();
+      if (!$('results').hidden) window.scrollTo(0, 0);
+    }, 120);
+  });
+  $('clearQ').addEventListener('click', () => { $('q').value = ''; render(); $('q').focus(); });
 
   function toast(text) {
     const t = $('toast');
@@ -306,7 +491,21 @@
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
   setInterval(checkForUpdate, 10 * 60 * 1000);
 
-  const net = () => { $('offline').hidden = navigator.onLine !== false; };
+  const net = () => {
+    const off = navigator.onLine === false;
+    $('offline').hidden = !off;
+    document.body.classList.toggle('is-offline', off);
+  };
+
+  // "/" jumps to search (computer keyboards), Esc clears it
+  document.addEventListener('keydown', (ev) => {
+    if ($('app').hidden) return;
+    const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
+    if (ev.key === '/' && !inField) { ev.preventDefault(); $('q').focus(); }
+    else if (ev.key === 'Escape' && document.activeElement === $('q')) {
+      if ($('q').value) { $('q').value = ''; render(); } else $('q').blur();
+    }
+  });
   window.addEventListener('online', net);
   window.addEventListener('offline', net);
   net();
